@@ -1,0 +1,30 @@
+# Virtual environment — never commit this (huge folder, machine-specific)
+venv/
+
+# Secret keys — NEVER commit this
+.env
+
+# Python cache files — auto-generated, not needed in git
+__pycache__/
+*.pyc
+*.pyo
+
+# Downloaded PDFs — too large for git
+data/pdfs/
+
+# Generated reports
+reports/
+
+# PyMuPDF temp files
+*.pdf.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# LangSmith / LangChain cache
+.langchain.db
