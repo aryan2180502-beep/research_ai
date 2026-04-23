@@ -29,13 +29,13 @@ Every code block follows this structure:
 | Agent | File | Status |
 |---|---|---|
 | Orchestrator | agents/orchestrator.py | ⏳ Week 2 |
-| ArXiv Agent | agents/arxiv_agent.py | ⏳ Week 2 |
-| GraphRAG Agent | agents/graphrag_agent.py | ⏳ Week 2 |
+| ArXiv Agent | agents/arxiv_agent.py | ✅ Complete |
+| GraphRAG Agent | agents/graphrag_agent.py | ✅ Complete |
 | Web Search Agent | agents/websearch_agent.py | ⏳ Week 3 |
 | Critic Agent | agents/critic_agent.py | ⏳ Week 3 |
 
 ### Tech Stack
-- LLM: Gemini 1.5 Pro (via langchain-google-genai)
+- LLM: gemini-2.0-flash-lite-001 (via langchain-google-genai)
 - Agent Framework: LangGraph
 - Graph Database: Neo4j 5.13 (Docker)
 - Search: ArXiv API + Tavily
@@ -50,11 +50,11 @@ Every code block follows this structure:
 ## 📁 Project Structure
 researchpilot/
 ├── agents/
-│   ├── orchestrator.py
-│   ├── arxiv_agent.py
-│   ├── graphrag_agent.py
-│   ├── websearch_agent.py
-│   └── critic_agent.py
+│   ├── orchestrator.py        ⏳ Week 2
+│   ├── arxiv_agent.py         ✅ Complete
+│   ├── graphrag_agent.py      ✅ Complete
+│   ├── websearch_agent.py     ⏳ Week 3
+│   └── critic_agent.py        ⏳ Week 3
 ├── pipeline/
 │   ├── arxiv_fetcher.py       ✅ Complete
 │   ├── pdf_parser.py          ✅ Complete
@@ -71,22 +71,25 @@ researchpilot/
 
 ---
 
-## ✅ Week 1 Progress
+## ✅ Progress
 
-### Completed
+### Week 1 — Complete
 - [x] Folder structure created
-- [x] Virtual environment set up (python3 -m venv venv)
+- [x] Virtual environment (python3 -m venv venv)
 - [x] requirements.txt installed
 - [x] .env + config.py with validation
 - [x] ArXiv fetcher (searches + downloads PDFs)
 - [x] Neo4j running in Docker
 - [x] Neo4j connection manager + schema
 - [x] Neo4j ingestor (MERGE-based, idempotent)
+- [x] pdf_parser.py (PyMuPDF text extraction)
 - [x] End-to-end pipeline test passed
 
-### Remaining Week 1
-- [x] pdf_parser.py ✅
-- [x] Week 1 fully complete
+### Week 2 — In Progress
+- [x] arxiv_agent.py — LangGraph agent, searches + downloads papers
+- [x] graphrag_agent.py — extracts concepts + relationships into Neo4j
+- [ ] queries.py — graph query helpers
+- [ ] orchestrator.py — coordinates all agents
 
 ---
 
@@ -99,7 +102,7 @@ researchpilot/
   - Username: neo4j
   - Password: researchpilot123
 
-### Start Commands (if services are stopped)
+### Start Commands
 ```bash
 # Start Neo4j
 docker start researchpilot-neo4j
@@ -109,155 +112,92 @@ cd /mnt/c/Users/aryan/Documents/researchpilot
 source venv/bin/activate
 ```
 
+### ⚠️ Known Issues
+- Free tier Gemini quota (20 req/day) runs out fast with multi-agent runs
+- Fix pending: combine extract_concepts + extract_relationships into
+  one LLM call using a single Pydantic schema (PaperAnalysis)
+- Neo4j container was recreated (lost old data) — schema needs
+  re-running on fresh container start:
+  python3 -c "
+  from graph.connection import Neo4jConnection, create_schema
+  conn = Neo4jConnection(); create_schema(conn); conn.close()
+  "
+
 ### Key Decisions Made
-1. Gemini 1.5 Pro instead of Claude (user's API key)
+1. gemini-2.0-flash-lite-001 — free tier, fast
 2. MERGE not CREATE in Cypher (idempotency)
 3. Dependency injection in Neo4jIngestor
 4. Logging over print() throughout
-5. Dataclass for Paper object
+5. @dataclass for Paper object
 6. Gradio over CSS/JS (AI/ML engineer context)
+7. Pydantic structured output (.with_structured_output()) 
+   instead of prompting for JSON — guarantees schema
+8. Lazy initialization for Neo4j in graphrag_agent
+9. max_pages=5 in PDFParser for concept extraction (balance speed/quality)
 
 ---
 
-## 📦 Key Files Content
+## 📦 File Signatures
 
 ### config.py
-# config.py
+- GOOGLE_API_KEY, GEMINI_MODEL, NEO4J_URI, NEO4J_USERNAME
+- NEO4J_PASSWORD, TAVILY_API_KEY, LANGCHAIN_API_KEY
+- MAX_PAPERS_PER_SEARCH, PDF_STORAGE_PATH, REPORT_STORAGE_PATH
+- Fail-fast validation on startup
 
-from dotenv import load_dotenv
-import os
+### pipeline/arxiv_fetcher.py
+- class Paper (dataclass): paper_id, title, authors, abstract,
+  published, pdf_url, local_pdf_path
+- class ArXivFetcher:
+  - search_papers(query, max_results) -> List[Paper]
+  - download_pdf(paper) -> Optional[str]
+  - fetch_and_download(query, max_results) -> List[Paper]
 
-load_dotenv()
+### pipeline/pdf_parser.py
+- class PDFParser(max_pages=None):
+  - extract_text(pdf_path) -> Optional[str]
+  - extract_abstract(pdf_path) -> Optional[str]
+  - _extract_with_pymupdf(pdf_path) -> str
+  - _clean_text(raw_text) -> str
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+### pipeline/neo4j_ingestor.py
+- class Neo4jIngestor(connection):
+  - ingest_paper(paper) -> bool
+  - ingest_papers(papers) -> dict
+  - add_concept_to_paper(paper_id, concept_name)
+  - link_related_concepts(concept_a, concept_b)
+  - get_graph_stats() -> dict
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+### graph/connection.py
+- class Neo4jConnection(uri, username, password):
+  - connect(), get_session(), run_query(query, parameters), close()
+- create_schema(conn) — creates constraints + indexes
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+### agents/arxiv_agent.py
+- Tools: search_arxiv(query, max_results), fetch_and_download_papers(query, max_results)
+- State: ArXivAgentState (messages, query, papers_found)
+- run_arxiv_agent(query) -> dict {query, summary, message_count}
 
-LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY")
-LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "true")
-LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "researchpilot-ai")
-
-APP_ENV = os.getenv("APP_ENV", "development")
-MAX_PAPERS_PER_SEARCH = int(os.getenv("MAX_PAPERS_PER_SEARCH", "10"))
-PDF_STORAGE_PATH = os.getenv("PDF_STORAGE_PATH", "data/pdfs/")
-REPORT_STORAGE_PATH = os.getenv("REPORT_STORAGE_PATH", "reports/")
-
-REQUIRED_KEYS = {
-    "GOOGLE_API_KEY": GOOGLE_API_KEY,
-    "NEO4J_PASSWORD": NEO4J_PASSWORD,
-    "TAVILY_API_KEY": TAVILY_API_KEY,
-}
-
-for key_name, key_value in REQUIRED_KEYS.items():
-    if not key_value:
-        raise ValueError(
-            f"❌ Missing required environment variable: {key_name}\n"
-            f"   Add it to your .env file and restart."
-        )
-
-print("✅ Config loaded successfully")
-
-Searched for regex `def |class ` (`**/pipeline/arxiv_fetcher.py`), 18 results
-
-Searched for regex `def |class ` (`**/pipeline/neo4j_ingestor.py`), 18 results
-
-Searched for regex `def |class ` (`**/graph/connection.py`), 8 results
-
-Here are the created files and all their class and function signatures, with a brief note on their use:
-
----
-
-### arxiv_fetcher.py
-
-- **class Paper:**
-  - Represents a research paper (metadata, local path, etc.).
-
-- **class ArXivFetcher:**
-  - Main class for searching and downloading papers from ArXiv.
-
-  - `def __init__(self, storage_path: str = PDF_STORAGE_PATH):`
-    - Initializes the fetcher with a storage path for PDFs.
-
-  - `def search_papers(self, query: str, max_results: int = 10) -> List[Paper]:`
-    - Searches ArXiv for papers matching a query.
-
-  - `def download_pdf(self, paper: Paper) -> Optional[str]:`
-    - Downloads the PDF for a given paper.
-
-  - `def fetch_and_download(self, query: str, max_results: int = 10) -> List[Paper]:`
-    - Searches and downloads papers in one step.
-
----
-
-### neo4j_ingestor.py
-
-- **class Neo4jIngestor:**
-  - Handles ingesting paper data into the Neo4j graph database.
-
-  - `def __init__(self, connection: Neo4jConnection):`
-    - Initializes with a Neo4j connection.
-
-  - `def ingest_paper(self, paper: Paper) -> bool:`
-    - Ingests a single paper into the graph.
-
-  - `def _create_paper_node(self, paper: Paper):`
-    - Creates a node for a paper.
-
-  - `def _create_author_relationship(self, paper_id: str, author_name: str):`
-    - Links an author to a paper.
-
-  - `def add_concept_to_paper(self, paper_id: str, concept_name: str):`
-    - Adds a concept node and links it to a paper.
-
-  - `def link_related_concepts(self, concept_a: str, concept_b: str):`
-    - Links two related concepts.
-
-  - `def ingest_papers(self, papers: List[Paper]) -> dict:`
-    - Ingests multiple papers at once.
-
-  - `def get_graph_stats(self) -> dict:`
-    - Returns statistics about the graph.
-
----
-
-### connection.py
-
-- **class Neo4jConnection:**
-  - Manages the connection to the Neo4j database (singleton-like).
-
-  - `def __init__(self, uri: str, user: str, password: str):`
-    - Initializes the connection.
-
-  - `def connect(self):`
-    - Establishes the connection.
-
-  - `def get_session(self):`
-    - Returns a session for running queries.
-
-  - `def run_query(self, query: str, parameters: dict = None):`
-    - Runs a Cypher query.
-
-  - `def close(self):`
-    - Closes the connection.
-
-- **def create_schema(conn: Neo4jConnection):**
-  - Creates the required schema in the Neo4j database.
-
+### agents/graphrag_agent.py
+- Pydantic schemas: ConceptList, ConceptPair, RelationshipList
+- Tools: extract_concepts_from_pdf(pdf_path, paper_id),
+         extract_relationships_from_concepts(paper_id, concepts_json),
+         get_graph_statistics()
+- State: GraphRAGAgentState (messages, papers)
+- run_graphrag_agent(papers: list[dict]) -> dict
+  papers dict keys: paper_id, title, local_pdf_path
 
 ---
 
 ## 🔜 Next Steps
-Currently on: Week 2 — Building the 5 agents with LangGraph
-First agent: arxiv_agent.py
+1. Fix quota issue: merge concept+relationship extraction into one LLM call
+2. Build queries.py (graph query helpers for the agents)
+3. Build orchestrator.py (coordinates arxiv + graphrag agents)
+4. Then Week 3: websearch_agent.py + critic_agent.py
 
 ---
 
-## 💼 Interview Concepts Covered So Far
+## 💼 Interview Concepts Covered
 - Separation of concerns (folder structure)
 - Virtual environments (dependency isolation)
 - Secrets management (.env + config.py)
@@ -272,3 +212,9 @@ First agent: arxiv_agent.py
 - Rate limiting (time.sleep)
 - Parameterized queries (injection prevention)
 - Loose coupling (LangChain provider abstraction)
+- LangGraph state machines vs linear chains
+- Tool binding (LLM + tools)
+- Structured outputs with Pydantic (.with_structured_output())
+- Lazy initialization
+- temperature=0 for deterministic agents
+- add_messages reducer in LangGraph state

@@ -13,7 +13,7 @@ load_dotenv()
 
 # ── LLM Settings ──────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.0-flash-lite-001"
 # We hardcode the model name here so if we ever upgrade to
 # gemini-2.0-pro, we change it in one place and everything updates.
 
