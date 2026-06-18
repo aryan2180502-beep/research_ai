@@ -9,13 +9,13 @@ from typing import Annotated, List
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
-from config import GOOGLE_API_KEY
+from config import NVIDIA_MODEL, NVIDIA_API_KEY
 from pipeline.arxiv_fetcher import ArXivFetcher, Paper
 
 import warnings
@@ -120,9 +120,9 @@ def _create_llm_with_tools():
     - A text message (thinking/final answer)
     - A tool call (I want to run search_arxiv with these args)
     """
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-lite-001",
-        google_api_key=GOOGLE_API_KEY,
+    llm = ChatNVIDIA(
+        model=NVIDIA_MODEL,
+        api_key=NVIDIA_API_KEY,
         temperature=0
         # temperature=0 means deterministic output —
         # same input always gives same output.

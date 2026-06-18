@@ -52,7 +52,11 @@ class ArXivFetcher:
         storage_path: where to save downloaded PDFs
         """
         self.storage_path = storage_path
-        self.client = arxiv.Client()
+        self.client = arxiv.Client(
+            page_size=5,
+            delay_seconds=30,
+            num_retries=3
+        )
         # arxiv.Client() is the official ArXiv API client.
         # We create it once here and reuse it for all searches.
         # Creating it once (not every search) is more efficient.
@@ -76,6 +80,8 @@ class ArXivFetcher:
         Returns: a list of Paper objects
         """
         logger.info(f"🔍 Searching ArXiv for: '{query}'")
+
+        time.sleep(3)
 
         # ── Build the search ──────────────────────────────────────
         search = arxiv.Search(
@@ -161,7 +167,7 @@ class ArXivFetcher:
             logger.info(f"✅ Saved to: {filepath}")
 
             # Be polite to ArXiv's servers — wait between downloads
-            time.sleep(1)
+            time.sleep(3)
             # ArXiv has rate limits. If you download too fast,
             # they'll block your IP. 1 second between downloads
             # is the recommended courtesy delay.

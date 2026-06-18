@@ -28,15 +28,15 @@ Every code block follows this structure:
 ### 5 Agents
 | Agent | File | Status |
 |---|---|---|
-| Orchestrator | agents/orchestrator.py | ⏳ Week 2 |
+| Orchestrator | agents/orchestrator.py | ✅ Complete |
 | ArXiv Agent | agents/arxiv_agent.py | ✅ Complete |
 | GraphRAG Agent | agents/graphrag_agent.py | ✅ Complete |
 | Web Search Agent | agents/websearch_agent.py | ⏳ Week 3 |
 | Critic Agent | agents/critic_agent.py | ⏳ Week 3 |
 
 ### Tech Stack
-- LLM: gemini-2.0-flash-lite-001 (via langchain-google-genai)
-- Agent Framework: LangGraph
+- LLM: meta/llama-3.1-8b-instruct (via NVIDIA NIM / langchain-nvidia-ai-endpoints)
+- Agent Framework: LangGraph (used selectively — see Key Decisions)
 - Graph Database: Neo4j 5.13 (Docker)
 - Search: ArXiv API + Tavily
 - API: FastAPI + Uvicorn
@@ -48,9 +48,10 @@ Every code block follows this structure:
 ---
 
 ## 📁 Project Structure
+```
 researchpilot/
 ├── agents/
-│   ├── orchestrator.py        ⏳ Week 2
+│   ├── orchestrator.py        ✅ Complete
 │   ├── arxiv_agent.py         ✅ Complete
 │   ├── graphrag_agent.py      ✅ Complete
 │   ├── websearch_agent.py     ⏳ Week 3
@@ -61,13 +62,14 @@ researchpilot/
 │   └── neo4j_ingestor.py      ✅ Complete
 ├── graph/
 │   ├── connection.py          ✅ Complete
-│   └── queries.py             ⏳ Week 2
+│   └── queries.py             ✅ Complete
 ├── api/routes.py              ⏳ Week 4
 ├── ui/app.py                  ⏳ Week 4
 ├── scheduler/update_job.py    ⏳ Week 3
 ├── tests/                     ⏳ Ongoing
 ├── config.py                  ✅ Complete
 └── main.py                    ⏳ Week 4
+```
 
 ---
 
@@ -85,11 +87,20 @@ researchpilot/
 - [x] pdf_parser.py (PyMuPDF text extraction)
 - [x] End-to-end pipeline test passed
 
-### Week 2 — In Progress
+### Week 2 — Complete
 - [x] arxiv_agent.py — LangGraph agent, searches + downloads papers
-- [x] graphrag_agent.py — extracts concepts + relationships into Neo4j
-- [ ] queries.py — graph query helpers
-- [ ] orchestrator.py — coordinates all agents
+- [x] graphrag_agent.py — rebuilt as direct loop (see Key Decisions #10)
+- [x] queries.py — graph query helpers
+- [x] orchestrator.py — coordinates arxiv + graphrag agents
+- [x] Migrated from Gemini to NVIDIA NIM (ChatNVIDIA)
+- [x] Fixed ArXiv HTTP 429 rate limiting
+- [x] Fixed structured output returning None (Llama reliability)
+- [x] Fixed Llama single-tool-call constraint in LangGraph
+
+### Week 3 — Up Next
+- [ ] websearch_agent.py — Tavily web search agent
+- [ ] critic_agent.py — evaluates and scores research reports
+- [ ] scheduler/update_job.py — APScheduler periodic runs
 
 ---
 
@@ -107,40 +118,38 @@ researchpilot/
 # Start Neo4j
 docker start researchpilot-neo4j
 
-# Activate virtual environment
-cd /mnt/c/Users/aryan/Documents/researchpilot
-source venv/bin/activate
+# Activate virtual environment (Windows)
+cd C:\Users\aryan\Documents\researchpilot
+venv\Scripts\activate
 ```
 
-### ⚠️ Known Issues
-- Free tier Gemini quota (20 req/day) runs out fast with multi-agent runs
-- Fix pending: combine extract_concepts + extract_relationships into
-  one LLM call using a single Pydantic schema (PaperAnalysis)
-- Neo4j container was recreated (lost old data) — schema needs
-  re-running on fresh container start:
-  python3 -c "
-  from graph.connection import Neo4jConnection, create_schema
-  conn = Neo4jConnection(); create_schema(conn); conn.close()
-  "
+### Re-run Schema on Fresh Neo4j Container
+```bash
+python3 -c "
+from graph.connection import Neo4jConnection, create_schema
+conn = Neo4jConnection(); create_schema(conn); conn.close()
+"
+```
 
-### Key Decisions Made
-1. gemini-2.0-flash-lite-001 — free tier, fast
-2. MERGE not CREATE in Cypher (idempotency)
-3. Dependency injection in Neo4jIngestor
-4. Logging over print() throughout
-5. @dataclass for Paper object
-6. Gradio over CSS/JS (AI/ML engineer context)
-7. Pydantic structured output (.with_structured_output()) 
-   instead of prompting for JSON — guarantees schema
-8. Lazy initialization for Neo4j in graphrag_agent
-9. max_pages=5 in PDFParser for concept extraction (balance speed/quality)
+### ⚠️ Known Issues / Resolved
+- ✅ FIXED: Gemini quota (20 req/day) — migrated to NVIDIA NIM
+- ✅ FIXED: Two LLM calls per paper — merged into one via PaperAnalysis schema
+- ✅ FIXED: ArXiv HTTP 429 — added delay_seconds=10, num_retries=3 to arxiv.Client
+  and time.sleep(3) before each search call. Use specific queries, not broad ones
+  like "transformers"
+- ✅ FIXED: structured_llm.invoke() returning None — added try/except + retry
+  with simpler prompt + safe error return (never crashes pipeline)
+- ✅ FIXED: Llama "single tool-call at once" LangGraph crash — removed LangGraph
+  from graphrag_agent, replaced with direct for loop (see Key Decisions #10)
+- ⚠️  Neo4j UnknownLabelWarning on fresh container — harmless, schema just needs
+  re-running (see command above)
 
 ---
 
 ## 📦 File Signatures
 
 ### config.py
-- GOOGLE_API_KEY, GEMINI_MODEL, NEO4J_URI, NEO4J_USERNAME
+- NVIDIA_API_KEY, NVIDIA_MODEL, NEO4J_URI, NEO4J_USERNAME
 - NEO4J_PASSWORD, TAVILY_API_KEY, LANGCHAIN_API_KEY
 - MAX_PAPERS_PER_SEARCH, PDF_STORAGE_PATH, REPORT_STORAGE_PATH
 - Fail-fast validation on startup
@@ -149,7 +158,8 @@ source venv/bin/activate
 - class Paper (dataclass): paper_id, title, authors, abstract,
   published, pdf_url, local_pdf_path
 - class ArXivFetcher:
-  - search_papers(query, max_results) -> List[Paper]
+  - client = arxiv.Client(page_size=5, delay_seconds=10, num_retries=3)
+  - search_papers(query, max_results) -> List[Paper]  [has time.sleep(3) at start]
   - download_pdf(paper) -> Optional[str]
   - fetch_and_download(query, max_results) -> List[Paper]
 
@@ -173,27 +183,80 @@ source venv/bin/activate
   - connect(), get_session(), run_query(query, parameters), close()
 - create_schema(conn) — creates constraints + indexes
 
+### graph/queries.py
+- get_all_concepts(conn) -> list[str]
+- get_concepts_for_paper(conn, paper_id) -> list[str]
+- get_related_concepts(conn, concept_name) -> list[str]
+- get_papers_by_concept(conn, concept_name) -> list[dict]
+- find_research_gaps(conn, min_papers=2) -> list[dict]
+  — finds concepts in multiple papers with zero relationships (isolated nodes)
+- get_most_connected_concepts(conn, top_n=10) -> list[dict]
+- get_graph_summary(conn) -> dict {papers, concepts, relationships}
+
 ### agents/arxiv_agent.py
 - Tools: search_arxiv(query, max_results), fetch_and_download_papers(query, max_results)
 - State: ArXivAgentState (messages, query, papers_found)
-- run_arxiv_agent(query) -> dict {query, summary, message_count}
+- run_arxiv_agent(query) -> dict {query, summary, papers: list[dict]}
+  papers dict keys: paper_id, title, local_pdf_path
 
 ### agents/graphrag_agent.py
-- Pydantic schemas: ConceptList, ConceptPair, RelationshipList
-- Tools: extract_concepts_from_pdf(pdf_path, paper_id),
-         extract_relationships_from_concepts(paper_id, concepts_json),
+- Pydantic schemas:
+  - Relationship(concept_a, concept_b, relation)
+  - PaperAnalysis(concepts: list[str], relationships: list[Relationship])
+- Tools: analyze_paper(pdf_path, paper_id) — ONE LLM call for both concepts + relationships
          get_graph_statistics()
-- State: GraphRAGAgentState (messages, papers)
+- Lazy Neo4j init: get_ingestor() -> Neo4jIngestor
+- ⚠️  NO LangGraph — uses direct for loop (Llama only supports single tool-call)
 - run_graphrag_agent(papers: list[dict]) -> dict
+  {status, processed, errors: list[str], papers: list[dict]}
   papers dict keys: paper_id, title, local_pdf_path
+
+### agents/orchestrator.py
+- @dataclass OrchestrationResult:
+  query, papers_found, papers_analyzed, graph_summary,
+  research_gaps, hub_concepts, errors, started_at, completed_at
+  - to_report() -> str  (markdown report)
+- class Orchestrator(max_papers=3):
+  - run(query) -> OrchestrationResult
+  - Stage 1: run_arxiv_agent(query)
+  - Stage 2: run_graphrag_agent(papers[:max_papers])
+  - Stage 3: graph queries (summary + gaps + hubs)
+  - Each stage wrapped in try/except — pipeline degrades, never crashes
+- run_pipeline(query, max_papers=3) -> str  (facade, returns markdown)
 
 ---
 
-## 🔜 Next Steps
-1. Fix quota issue: merge concept+relationship extraction into one LLM call
-2. Build queries.py (graph query helpers for the agents)
-3. Build orchestrator.py (coordinates arxiv + graphrag agents)
-4. Then Week 3: websearch_agent.py + critic_agent.py
+## 🔜 Next Steps (Week 3)
+1. websearch_agent.py — Tavily search, supplements ArXiv with web results
+2. critic_agent.py — scores papers/reports for relevance and quality
+3. scheduler/update_job.py — APScheduler for periodic pipeline runs
+4. Then Week 4: FastAPI routes + Gradio UI + main.py
+
+---
+
+## 🔑 Key Decisions Made
+1. NVIDIA NIM (meta/llama-3.1-8b-instruct) — free tier, replaces Gemini
+2. ChatNVIDIA from langchain-nvidia-ai-endpoints — drop-in LangChain replacement
+3. MERGE not CREATE in Cypher — idempotency
+4. Dependency injection in Neo4jIngestor
+5. Logging over print() throughout
+6. @dataclass for Paper object
+7. Gradio over CSS/JS — right tool for AI/ML engineer portfolio
+8. Pydantic structured output (.with_structured_output()) — guarantees schema
+9. Lazy initialization for Neo4j in graphrag_agent
+10. ⭐ GraphRAG uses direct for loop, NOT LangGraph — Llama 3.1 8B rejects
+    parallel/sequential multi-tool calls in LangGraph. Rule learned:
+    use LangGraph only when agent needs to REASON about what to do next,
+    not when the workflow is deterministic
+11. PaperAnalysis unified schema — one LLM call per paper (concepts + relationships)
+12. Domain-agnostic prompts — never say "ML/AI concepts", say "key concepts"
+    so the system works for any research domain (biology, physics, etc.)
+13. text[:2500] cap in analyze_paper — controls tokens, reduces None returns
+14. Three-layer defense in analyze_paper: try/except → retry simpler prompt →
+    safe error return. One bad paper never crashes the pipeline
+15. ArXiv client config: delay_seconds=10, num_retries=3, plus time.sleep(3)
+    before search. Use specific queries, not broad ones like "transformers"
+16. max_pages=5 in PDFParser — balance between speed and extraction quality
 
 ---
 
@@ -209,12 +272,20 @@ source venv/bin/activate
 - Singleton pattern (connection manager)
 - Dependency injection
 - Idempotency (MERGE vs CREATE)
-- Rate limiting (time.sleep)
+- Rate limiting (time.sleep + client config)
 - Parameterized queries (injection prevention)
 - Loose coupling (LangChain provider abstraction)
-- LangGraph state machines vs linear chains
+- LangGraph state machines vs linear chains — and when NOT to use LangGraph
 - Tool binding (LLM + tools)
 - Structured outputs with Pydantic (.with_structured_output())
 - Lazy initialization
 - temperature=0 for deterministic agents
 - add_messages reducer in LangGraph state
+- Schema consolidation (PaperAnalysis — one call vs two)
+- Graceful degradation (try/except per stage in orchestrator)
+- Facade pattern (run_pipeline() hides Orchestrator class)
+- Repository pattern (queries.py — graph queries in one place)
+- Graph-based research gap detection (isolated but popular concept nodes)
+- Domain-agnostic prompt design
+- Three-layer LLM reliability defense (try → retry → safe error)
+- LLM model constraints (single tool-call limitation in smaller models)

@@ -12,10 +12,8 @@ load_dotenv()
 # can access them.
 
 # ── LLM Settings ──────────────────────────────────────────────────────
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash-lite-001"
-# We hardcode the model name here so if we ever upgrade to
-# gemini-2.0-pro, we change it in one place and everything updates.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_MODEL = "meta/llama-3.1-8b-instruct"
 
 # ── Neo4j Settings ────────────────────────────────────────────────────
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -35,7 +33,7 @@ LANGCHAIN_PROJECT = os.getenv("LANGCHAIN_PROJECT", "researchpilot-ai")
 
 # ── App Settings ──────────────────────────────────────────────────────
 APP_ENV = os.getenv("APP_ENV", "development")
-MAX_PAPERS_PER_SEARCH = int(os.getenv("MAX_PAPERS_PER_SEARCH", "10"))
+MAX_PAPERS_PER_SEARCH = int(os.getenv("MAX_PAPERS_PER_SEARCH", "5"))
 PDF_STORAGE_PATH = os.getenv("PDF_STORAGE_PATH", "data/pdfs/")
 REPORT_STORAGE_PATH = os.getenv("REPORT_STORAGE_PATH", "reports/")
 # int() converts the string "10" from .env into the number 10.
@@ -46,7 +44,7 @@ REPORT_STORAGE_PATH = os.getenv("REPORT_STORAGE_PATH", "reports/")
 # Better to crash immediately with a clear message than to fail
 # mysteriously later when an agent tries to use a None key.
 REQUIRED_KEYS = {
-    "GOOGLE_API_KEY": GOOGLE_API_KEY,
+    "NVIDIA_API_KEY": NVIDIA_API_KEY,
     "NEO4J_PASSWORD": NEO4J_PASSWORD,
     "TAVILY_API_KEY": TAVILY_API_KEY,
 }

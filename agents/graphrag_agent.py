@@ -2,281 +2,208 @@
 
 import json
 import logging
-import warnings
-from typing import Annotated, List
-
-warnings.filterwarnings("ignore", message="Key '.*' is not supported in schema")
-
-from langchain_core.messages import HumanMessage, SystemMessage
+from typing import Annotated, Optional
+from pydantic import BaseModel, Field
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from config import GOOGLE_API_KEY
+from config import NVIDIA_MODEL, NVIDIA_API_KEY
+from pipeline.pdf_parser import PDFParser
 from graph.connection import Neo4jConnection
 from pipeline.neo4j_ingestor import Neo4jIngestor
-from pipeline.pdf_parser import PDFParser
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────
+# 🧱 STEP 1: UNIFIED PYDANTIC SCHEMA
+# ─────────────────────────────────────────────
 
-# ── Pydantic Schemas ──────────────────────────────────────────────────
-# These define the EXACT shape the LLM must return.
-# No free text, no markdown, no guessing.
+class Relationship(BaseModel):
+    """A single directed relationship between two concepts."""
+    concept_a: str = Field(description="The source concept")
+    concept_b: str = Field(description="The target concept")
+    relation: str = Field(description="How concept_a relates to concept_b, e.g. 'improves', 'uses', 'extends'")
 
-class ConceptList(BaseModel):
-    """Schema for concept extraction."""
+class PaperAnalysis(BaseModel):
+    """
+    Complete analysis of a research paper in ONE LLM call.
+    Replaces ConceptList + RelationshipList.
+    """
     concepts: list[str] = Field(
-        description="Technical concepts, methods, and topics from the paper. Maximum 15."
+        description="5 to 8 key concepts from the paper as short noun phrases"
+    )
+    relationships: list[Relationship] = Field(
+        description="Meaningful connections between the concepts"
     )
 
-class ConceptPair(BaseModel):
-    """One pair of related concepts."""
-    concept_a: str
-    concept_b: str
+# ─────────────────────────────────────────────
+# 🧱 STEP 2: LAZY NEO4J INIT (unchanged pattern)
+# ─────────────────────────────────────────────
 
-class RelationshipList(BaseModel):
-    """Schema for relationship extraction."""
-    pairs: list[ConceptPair] = Field(
-        description="Pairs of concepts that are meaningfully related. Maximum 10."
-    )
+_neo4j_conn: Optional[Neo4jConnection] = None
+_ingestor: Optional[Neo4jIngestor] = None
 
-
-# ── Module-level instances ────────────────────────────────────────────
-_parser = PDFParser(max_pages=5)
-_conn = None
-_ingestor = None
-
-def _get_ingestor() -> Neo4jIngestor:
-    """Lazy initialization — only connects to Neo4j when first needed."""
-    global _conn, _ingestor
+def get_ingestor() -> Neo4jIngestor:
+    global _neo4j_conn, _ingestor
     if _ingestor is None:
-        _conn = Neo4jConnection()
-        _ingestor = Neo4jIngestor(_conn)
+        _neo4j_conn = Neo4jConnection()
+        _neo4j_conn.connect()
+        _ingestor = Neo4jIngestor(_neo4j_conn)
+        logger.info("Neo4j ingestor initialized")
     return _ingestor
 
-def _create_llm():
-    """Creates a fresh Gemini LLM instance."""
-    return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-lite-001",
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0
-    )
-
-
-# ── Tools ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# 🧱 STEP 3: UNIFIED TOOL (1 call instead of 2)
+# ─────────────────────────────────────────────
 
 @tool
-def extract_concepts_from_pdf(pdf_path: str, paper_id: str) -> str:
+def analyze_paper(pdf_path: str, paper_id: str) -> str:
     """
-    Extract key concepts from a research paper PDF using AI.
-    Reads the PDF text and identifies the main technical concepts,
-    methods, and topics discussed in the paper.
-    Returns a JSON list of concept names.
+    Extracts concepts AND relationships from a PDF in a single LLM call.
+    Stores results in Neo4j. Returns a summary string.
     """
-    # Step 1: Extract text from PDF
-    text = _parser.extract_text(pdf_path)
+    # --- Parse PDF text ---
+    parser = PDFParser(max_pages=5)
+    text = parser.extract_text(pdf_path)
+
     if not text:
         return json.dumps({"error": f"Could not extract text from {pdf_path}"})
 
-    # Step 2: Call LLM with structured output — guaranteed ConceptList back
-    structured_llm = _create_llm().with_structured_output(ConceptList)
+    # --- One LLM call with structured output ---
+    llm = ChatNVIDIA(
+        model=NVIDIA_MODEL,
+        api_key=NVIDIA_API_KEY,
+        temperature=0,
+    )
+    structured_llm = llm.with_structured_output(PaperAnalysis)
 
-    prompt = f"""
-    Read this research paper text and extract the key technical concepts.
+    prompt = f"""You are a research paper analyzer. Extract information from this research paper.
 
-    Focus on:
-    - Methods and algorithms (e.g. "attention mechanism", "BERT", "FAISS")
-    - Research areas (e.g. "natural language processing", "drug discovery")
-    - Technical components (e.g. "vector embeddings", "knowledge graph")
-    - Evaluation metrics (e.g. "BLEU score", "F1 score")
+Return ONLY these two things:
+1. concepts: a list of 5 to 8 key concepts from the paper as short noun phrases
+2. relationships: a list of connections between those concepts
 
-    Be specific, not generic.
-    Bad: ["machine learning", "data", "model"]
-    Good: ["retrieval augmented generation", "dense passage retrieval", "FAISS"]
+Paper excerpt:
+{text[:2500]}
+"""
+    result = None
+    try:
+        result = structured_llm.invoke(prompt)
+    except Exception as e:
+        logger.warning(f"Structured output call failed for {paper_id}: {e}")
 
-    Paper text:
-    {text[:3000]}
-    """
 
-    result = structured_llm.invoke(prompt)
-    # result is a ConceptList object — result.concepts is always list[str]
-    # No JSON parsing, no markdown stripping, no try/except needed here
+    if result is None:
+        logger.warning(f"Got None for {paper_id}, retrying with simpler prompt...")
+        simple_prompt = f"""List 5 key concepts from this text as JSON.
+Text: {text[:1500]}
+Return only: {{"concepts": ["concept1", "concept2", ...], "relationships": []}}"""
+        try:
+            result = structured_llm.invoke(simple_prompt)
+        except Exception as e:
+            logger.error(f"Retry also failed for {paper_id}: {e}")
 
-    # Step 3: Store concepts in Neo4j
-    ingestor = _get_ingestor()
+     # --- Layer 3: If still None, return safe error (don't crash) ---
+    if result is None:
+        logger.error(f"Could not extract structured output for paper {paper_id}")
+        return json.dumps({
+            "error": f"Structured output returned None for {paper_id}",
+            "paper_id": paper_id,
+        })
+
+    # --- Write to Neo4j ---
+    ingestor = get_ingestor()
     for concept in result.concepts:
-        if concept.strip():
-            ingestor.add_concept_to_paper(paper_id, concept.strip())
+        ingestor.add_concept_to_paper(paper_id, concept)
 
-    logger.info(f"✅ Extracted {len(result.concepts)} concepts from {paper_id}")
+    for rel in result.relationships:
+        ingestor.link_related_concepts(rel.concept_a, rel.concept_b)
+
+    logger.info(
+        f"Paper {paper_id}: stored {len(result.concepts)} concepts, "
+        f"{len(result.relationships)} relationships"
+    )
 
     return json.dumps({
         "paper_id": paper_id,
         "concepts": result.concepts,
-        "count": len(result.concepts)
-    })
-
-
-@tool
-def extract_relationships_from_concepts(paper_id: str, concepts_json: str) -> str:
-    """
-    Given a list of concepts from a paper, identify which concepts
-    are related to each other and store those relationships in the graph.
-    concepts_json should be a JSON array of concept name strings.
-    """
-    try:
-        concepts = json.loads(concepts_json)
-    except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON in concepts_json"})
-
-    if len(concepts) < 2:
-        return json.dumps({"message": "Need at least 2 concepts to find relationships"})
-
-    # Call LLM with structured output — guaranteed RelationshipList back
-    structured_llm = _create_llm().with_structured_output(RelationshipList)
-
-    prompt = f"""
-    Given these technical concepts from a research paper, identify which
-    pairs of concepts are meaningfully related to each other.
-
-    Concepts: {json.dumps(concepts)}
-
-    Only include pairs with a genuine technical relationship.
-    Maximum 10 pairs.
-    """
-
-    result = structured_llm.invoke(prompt)
-    # result is a RelationshipList object
-    # result.pairs is always a list of ConceptPair objects
-    # each ConceptPair has .concept_a and .concept_b — always strings
-
-    ingestor = _get_ingestor()
-    for pair in result.pairs:
-        ingestor.link_related_concepts(pair.concept_a, pair.concept_b)
-
-    logger.info(f"✅ Stored {len(result.pairs)} relationships for {paper_id}")
-
-    return json.dumps({
-        "paper_id": paper_id,
-        "relationships_stored": len(result.pairs),
-        "pairs": [[p.concept_a, p.concept_b] for p in result.pairs]
+        "relationships": [r.model_dump() for r in result.relationships],
     })
 
 
 @tool
 def get_graph_statistics() -> str:
-    """
-    Returns the current state of the knowledge graph —
-    how many papers, authors, concepts, and relationships exist.
-    Use this at the end to confirm data was stored correctly.
-    """
-    ingestor = _get_ingestor()
+    """Returns current Neo4j graph stats."""
+    ingestor = get_ingestor()
     stats = ingestor.get_graph_stats()
     return json.dumps(stats)
 
 
-# ── Agent State ───────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# 🧱 STEP 4: LANGGRAPH STATE + AGENT (unchanged pattern)
+# ─────────────────────────────────────────────
+
 class GraphRAGAgentState(TypedDict):
     messages: Annotated[list, add_messages]
-    papers: List[dict]
+    papers: list[dict]   # [{paper_id, title, local_pdf_path}]
 
+# ─────────────────────────────────────────────
+# 🧱 STEP 5: PUBLIC RUNNER FUNCTION -- no langgraph
+# ─────────────────────────────────────────────
 
-# ── Graph Nodes ───────────────────────────────────────────────────────
-def agent_node(state: GraphRAGAgentState) -> dict:
-    tools = [
-        extract_concepts_from_pdf,
-        extract_relationships_from_concepts,
-        get_graph_statistics
-    ]
-    llm_with_tools = _create_llm().bind_tools(tools)
-
-    system = SystemMessage(content="""
-    You are a knowledge graph construction agent.
-    Your job is to process research papers and build a knowledge graph.
-
-    For each paper provided:
-    1. Call extract_concepts_from_pdf with the pdf_path and paper_id
-    2. Take the concepts returned and call extract_relationships_from_concepts
-    3. After processing ALL papers, call get_graph_statistics once
-
-    Process one paper at a time, completing both steps before moving to the next.
-    """)
-
-    messages = [system] + state["messages"]
-    response = llm_with_tools.invoke(messages)
-    return {"messages": [response]}
-
-
-def should_continue(state: GraphRAGAgentState) -> str:
-    last_message = state["messages"][-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        return "tools"
-    return "end"
-
-
-# ── Build the Graph ───────────────────────────────────────────────────
-def create_graphrag_agent():
-    tools = [
-        extract_concepts_from_pdf,
-        extract_relationships_from_concepts,
-        get_graph_statistics
-    ]
-    tool_node = ToolNode(tools)
-
-    graph = StateGraph(GraphRAGAgentState)
-    graph.add_node("agent", agent_node)
-    graph.add_node("tools", tool_node)
-
-    graph.add_edge(START, "agent")
-    graph.add_conditional_edges(
-        "agent",
-        should_continue,
-        {"tools": "tools", "end": END}
-    )
-    graph.add_edge("tools", "agent")
-
-    return graph.compile()
-
-
-# ── Public Interface ──────────────────────────────────────────────────
-def run_graphrag_agent(papers: list) -> dict:
+def run_graphrag_agent(papers: list[dict]) -> dict:
     """
-    Main function called by the Orchestrator.
-    papers: list of dicts with keys paper_id, title, local_pdf_path
+    Entry point called by orchestrator.
+    Loops over papers and calls analyze_paper tool directly.
+    No LangGraph needed — the workflow is deterministic, not agentic.
     """
     if not papers:
-        return {"error": "No papers provided"}
+        return {"status": "no_papers", "processed": 0}
 
-    logger.info(f"🤖 GraphRAG Agent starting — processing {len(papers)} papers")
+    results = []
+    errors = []
 
-    app = create_graphrag_agent()
+    for paper in papers:
+        paper_id = paper.get("paper_id")
+        pdf_path = paper.get("local_pdf_path")
 
-    papers_description = "\n".join([
-        f"- paper_id: {p['paper_id']}, "
-        f"title: {p['title'][:60]}, "
-        f"pdf_path: {p['local_pdf_path']}"
-        for p in papers
-    ])
+        # Skip papers with no PDF
+        if not pdf_path:
+            logger.warning(f"Skipping {paper_id} — no local_pdf_path")
+            continue
 
-    initial_state = {
-        "messages": [HumanMessage(
-            content=f"Process these research papers into the knowledge graph:\n{papers_description}"
-        )],
-        "papers": papers
-    }
+        logger.info(f"Processing paper: {paper_id}")
+        try:
+            # Call the tool function directly (not via LangGraph)
+            output = analyze_paper.invoke({
+                "pdf_path": pdf_path,
+                "paper_id": paper_id,
+            })
+            parsed = json.loads(output)
 
-    final_state = app.invoke(initial_state)
-    final_message = final_state["messages"][-1].content
+            if "error" in parsed:
+                logger.warning(f"Paper {paper_id} returned error: {parsed['error']}")
+                errors.append(parsed["error"])
+            else:
+                results.append(parsed)
+                logger.info(
+                    f"✅ {paper_id}: "
+                    f"{len(parsed.get('concepts', []))} concepts, "
+                    f"{len(parsed.get('relationships', []))} relationships"
+                )
 
-    logger.info("✅ GraphRAG Agent complete")
+        except Exception as e:
+            msg = f"Failed to process {paper_id}: {e}"
+            logger.error(msg)
+            errors.append(msg)
 
     return {
-        "papers_processed": len(papers),
-        "summary": final_message,
-        "steps_taken": len(final_state["messages"])
+        "status": "complete",
+        "processed": len(results),
+        "errors": errors,
+        "papers": results,
     }
