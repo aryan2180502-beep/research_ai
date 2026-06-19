@@ -59,50 +59,50 @@
 # testing.py
 # Full pipeline test — runs all stages and prints a detailed report
 
-import logging
-import sys
+# import logging
+# import sys
 
-# ── Setup logging so we can see what each agent is doing ──────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
+# # ── Setup logging so we can see what each agent is doing ──────────────
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+#     datefmt="%H:%M:%S",
+# )
 
-# Suppress noisy third-party loggers
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("arxiv").setLevel(logging.WARNING)
+# # Suppress noisy third-party loggers
+# logging.getLogger("httpx").setLevel(logging.WARNING)
+# logging.getLogger("httpcore").setLevel(logging.WARNING)
+# logging.getLogger("arxiv").setLevel(logging.WARNING)
 
-from agents.orchestrator import run_pipeline
+# from agents.orchestrator import run_pipeline
 
-# ── Test Query ────────────────────────────────────────────────────────
-QUERY = "attention mechanism in transformers"
-MAX_PAPERS = 2   # keep low for testing — faster + fewer API calls
+# # ── Test Query ────────────────────────────────────────────────────────
+# QUERY = "attention mechanism in transformers"
+# MAX_PAPERS = 2   # keep low for testing — faster + fewer API calls
 
-print("\n" + "="*60)
-print(f"  ResearchPilot Full Pipeline Test")
-print(f"  Query: '{QUERY}'")
-print(f"  Max papers: {MAX_PAPERS}")
-print("="*60 + "\n")
+# print("\n" + "="*60)
+# print(f"  ResearchPilot Full Pipeline Test")
+# print(f"  Query: '{QUERY}'")
+# print(f"  Max papers: {MAX_PAPERS}")
+# print("="*60 + "\n")
 
-# ── Run the pipeline ──────────────────────────────────────────────────
-try:
-    report = run_pipeline(QUERY, max_papers=MAX_PAPERS)
+# # ── Run the pipeline ──────────────────────────────────────────────────
+# try:
+#     report = run_pipeline(QUERY, max_papers=MAX_PAPERS)
 
-    print("\n" + "="*60)
-    print("  FINAL REPORT")
-    print("="*60)
-    print(report)
+#     print("\n" + "="*60)
+#     print("  FINAL REPORT")
+#     print("="*60)
+#     print(report)
 
-    print("\n" + "="*60)
-    print("  ✅ Pipeline completed successfully")
-    print("="*60)
+#     print("\n" + "="*60)
+#     print("  ✅ Pipeline completed successfully")
+#     print("="*60)
 
-except Exception as e:
-    print(f"\n❌ Pipeline crashed with unhandled exception: {e}")
-    logging.exception("Full traceback:")
-    sys.exit(1)
+# except Exception as e:
+#     print(f"\n❌ Pipeline crashed with unhandled exception: {e}")
+#     logging.exception("Full traceback:")
+#     sys.exit(1)
 
 
 # Add to testing.py temporarily
@@ -124,3 +124,8 @@ except Exception as e:
 # print("Verdict:", critique["verdict"])
 # print("Strengths:", critique["strengths"])
 # print("Weaknesses:", critique["weaknesses"])
+
+
+
+from agents.orchestrator import run_pipeline
+print(run_pipeline('attention mechanisms in transformers'))

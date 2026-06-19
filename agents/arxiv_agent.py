@@ -250,31 +250,50 @@ def run_arxiv_agent(query: str) -> dict:
     The main function other parts of the system call.
 
     query: research topic to search for
-    Returns: dict with the agent's findings
+    Returns: dict with query, summary, and papers list
     """
     logger.info(f"🤖 ArXiv Agent starting for query: '{query}'")
 
     app = create_arxiv_agent()
 
-    # Initial state — this is what the agent starts with
     initial_state = {
         "messages": [HumanMessage(content=f"Find research papers about: {query}")],
         "query": query,
         "papers_found": []
     }
 
-    # Run the graph until it reaches END
     final_state = app.invoke(initial_state)
-
-    # Extract the last message (agent's final answer)
     final_message = final_state["messages"][-1].content
 
-    logger.info("✅ ArXiv Agent complete")
+    # ── THE FIX ───────────────────────────────────────────────────────
+    # The LangGraph agent ran fetch_and_download_papers as a tool,
+    # but tool results are just strings in the message history —
+    # the actual Paper objects were never captured anywhere.
+    #
+    # Solution: call fetch_and_download directly after the agent loop
+    # to get the real Paper objects with paper_id and local_pdf_path.
+    #
+    # This is intentionally simple — the agent already confirmed what
+    # to search for. We trust its query choice, re-run the download
+    # to get structured data back.
+    # ─────────────────────────────────────────────────────────────────
+    papers = _fetcher.fetch_and_download(query, max_results=3)
+
+    papers_as_dicts = [
+        {
+            "paper_id": p.paper_id,
+            "title": p.title,
+            "local_pdf_path": p.local_pdf_path,
+        }
+        for p in papers
+        if p.local_pdf_path  # only include papers that downloaded successfully
+    ]
+
+    logger.info(f"✅ ArXiv Agent complete — {len(papers_as_dicts)} papers ready for pipeline")
 
     return {
         "query": query,
         "summary": final_message,
+        "papers": papers_as_dicts,
         "message_count": len(final_state["messages"])
-        # message_count tells you how many back-and-forth
-        # steps the agent took — useful for debugging
     }

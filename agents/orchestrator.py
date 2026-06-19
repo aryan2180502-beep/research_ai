@@ -3,6 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from langsmith import traceable
 
 from agents.arxiv_agent import run_arxiv_agent
 from agents.graphrag_agent import run_graphrag_agent
@@ -137,6 +138,7 @@ class Orchestrator:
         self.max_papers = max_papers
         logger.info(f"Orchestrator initialized (max_papers={max_papers})")
 
+    @traceable(name="research_pipeline", run_type="chain")
     def run(self, query: str) -> OrchestrationResult:
         result = OrchestrationResult(
             query=query,
