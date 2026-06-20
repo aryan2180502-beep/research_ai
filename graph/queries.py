@@ -16,7 +16,7 @@ def get_concepts_for_paper(conn: Neo4jConnection, paper_id: str) -> list[str]:
     """Returns all concepts linked to a specific paper."""
     result = conn.run_query(
         """
-        MATCH (p:Paper {paper_id: $paper_id})-[:HAS_CONCEPT]->(c:Concept)
+        MATCH (p:Paper {paper_id: $paper_id})-[:INTRODUCES]->(c:Concept)
         RETURN c.name AS name
         """,
         parameters={"paper_id": paper_id},
@@ -40,7 +40,7 @@ def get_papers_by_concept(conn: Neo4jConnection, concept_name: str) -> list[dict
     """Returns all papers that mention a given concept."""
     result = conn.run_query(
         """
-        MATCH (p:Paper)-[:HAS_CONCEPT]->(c:Concept {name: $name})
+        MATCH (p:Paper)-[:INTRODUCES]->(c:Concept {name: $name})
         RETURN p.paper_id AS paper_id, p.title AS title
         """,
         parameters={"name": concept_name},
@@ -55,7 +55,7 @@ def find_research_gaps(conn: Neo4jConnection, min_papers: int = 2) -> list[dict]
     """
     result = conn.run_query(
         """
-        MATCH (c:Concept)<-[:HAS_CONCEPT]-(p:Paper)
+        MATCH (c:Concept)<-[:INTRODUCES]-(p:Paper)
         WITH c, COUNT(p) AS paper_count
         WHERE paper_count >= $min_papers
           AND NOT (c)-[:RELATED_TO]-()
@@ -82,12 +82,19 @@ def get_most_connected_concepts(conn: Neo4jConnection, top_n: int = 10) -> list[
 
 
 def get_graph_summary(conn: Neo4jConnection) -> dict:
-    """High-level stats — used by orchestrator for reporting."""
+    """
+    High-level stats — used by orchestrator for reporting.
+    
+    Refactored to use OPTIONAL MATCH for robustness:
+    - Each count is independent (no cascading failures)
+    - Returns zeros gracefully if no nodes of a type exist
+    - Cleaner, more maintainable than chained WITH clauses
+    """
     result = conn.run_query(
         """
-        MATCH (p:Paper) WITH COUNT(p) AS papers
-        MATCH (c:Concept) WITH papers, COUNT(c) AS concepts
-        MATCH ()-[r:RELATED_TO]->() WITH papers, concepts, COUNT(r) AS relationships
+        OPTIONAL MATCH (p:Paper) WITH COUNT(p) AS papers
+        OPTIONAL MATCH (c:Concept) WITH papers, COUNT(c) AS concepts
+        OPTIONAL MATCH ()-[r:RELATED_TO]->() WITH papers, concepts, COUNT(r) AS relationships
         RETURN papers, concepts, relationships
         """
     )

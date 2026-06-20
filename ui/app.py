@@ -5,6 +5,17 @@
 # That separation means the UI is just one possible client of the
 # API; you could swap it for a React app later and nothing about
 # the backend would need to change.
+#
+# ARCHITECTURE NOTE (Phase 2g): the "Run Research" tab's PDF download
+# panel is a second, documented exception to the "UI only talks to the
+# API" rule — same category as NEO4J_BROWSER_URL below. The API returns
+# each paper's local_pdf_path as a string in the JSON response; this
+# Gradio process then reads that path directly off disk via gr.File()
+# rather than the API re-streaming bytes it already has on the same
+# machine through a dedicated endpoint. This only works because UI and
+# API are co-located in dev. If they ever become separate machines,
+# this breaks and needs a real /papers/{id}/pdf streaming endpoint —
+# noted here so future-you doesn't have to rediscover that the hard way.
 
 import logging
 
@@ -16,45 +27,43 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────
 API_BASE_URL = "http://localhost:8000"
-# Hardcoded for now since UI and API run on the same machine during
-# development. If you ever deploy these as separate services (e.g.
-# API on a server, UI elsewhere), this becomes an environment
-# variable instead — same idea as NVIDIA_API_KEY living in .env
-# rather than being hardcoded in config.py.
-
 REQUEST_TIMEOUT = 500
-# /research can legitimately take 30-60+ seconds (it's a synchronous
-# call that runs the ENTIRE pipeline). 120s gives headroom before
-# requests.post() gives up and raises a timeout exception.
 
 NEO4J_BROWSER_URL = (
     "http://localhost:7474/browser/?cmd=edit&arg="
     "MATCH%20(n)%20RETURN%20n%20LIMIT%20100"
 )
-# Pragmatic, documented exception to the "UI only talks to the API"
-# rule (see module docstring above). Building a custom graph
-# visualization endpoint (e.g. via Pyvis) was the "right" way to do
-# this, but for now this link-out gets a real, interactive view of
-# the concept graph shipped today instead of left as a TODO.
-# Bypasses api/routes.py entirely — the user's own browser talks
-# directly to Neo4j Browser, not through this app.
 
 
 # ── API Client Functions ─────────────────────────────────────────────
-# Each function below wraps exactly one API endpoint. Keeping a 1:1
-# mapping between "thing the UI can do" and "function that calls the
-# API" makes it trivial to find what to change later if a route's
-# shape changes — same single-responsibility instinct as your agents/
-# folder, just applied to HTTP calls instead of LLM tools.
 
-def call_research_api(query: str, max_papers: int) -> tuple[str, str]:
+def _format_papers_panel(paper_analyses: list[dict]) -> str:
     """
-    Calls POST /research. Returns (report_markdown, status_message)
-    as a tuple because the Gradio UI shows both: the full report in
-    one box, and a short status/error line in another.
+    NEW (Phase 2g): renders the right-hand "Actions" panel's text —
+    one line per paper with its title and how many concepts were
+    extracted from it. Kept deliberately short; the full per-concept
+    summaries already live in report_output on the left.
+    """
+    if not paper_analyses:
+        return "_No papers analyzed in this run._"
+
+    lines = ["### 📑 Papers in this run", ""]
+    for a in paper_analyses:
+        concept_count = len(a.get("concepts", []))
+        lines.append(f"- **{a.get('title', 'Untitled')}** — {concept_count} concepts")
+    return "\n".join(lines)
+
+
+def call_research_api(query: str, max_papers: int):
+    """
+    Calls POST /research. Returns a 4-tuple:
+    (report_markdown, status_message, papers_panel_markdown, pdf_paths)
+
+    NEW (Phase 2g): grew from 2 outputs to 4 — the extra two feed the
+    right-hand side panel (layout C) that didn't exist before.
     """
     if not query or len(query.strip()) < 3:
-        return "", "⚠️ Please enter a query (at least 3 characters)."
+        return "", "⚠️ Please enter a query (at least 3 characters).", "", []
 
     try:
         response = requests.post(
@@ -63,40 +72,42 @@ def call_research_api(query: str, max_papers: int) -> tuple[str, str]:
             timeout=REQUEST_TIMEOUT,
         )
     except requests.exceptions.ConnectionError:
-        # This is the single most common failure mode for a beginner
-        # running this for the first time: forgetting to start
-        # uvicorn before starting Gradio. Give a message that
-        # actually tells them what to do, not a raw stack trace.
-        return "", "❌ Could not connect to the API. Is `uvicorn api.routes:app` running on port 8000?"
+        return (
+            "",
+            "❌ Could not connect to the API. Is `uvicorn api.routes:app` running on port 8000?",
+            "",
+            [],
+        )
     except requests.exceptions.Timeout:
-        return "", f"❌ Request timed out after {REQUEST_TIMEOUT}s. The pipeline may still be running server-side."
+        return (
+            "",
+            f"❌ Request timed out after {REQUEST_TIMEOUT}s. The pipeline may still be running server-side.",
+            "",
+            [],
+        )
 
     if response.status_code != 200:
-        # FastAPI's HTTPException responses always have a "detail" key —
-        # surface that directly instead of a generic "something broke".
         detail = response.json().get("detail", response.text)
-        return "", f"❌ API error ({response.status_code}): {detail}"
+        return "", f"❌ API error ({response.status_code}): {detail}", "", []
 
     data = response.json()
     status = f"✅ Done — {data['papers_found']} papers found, {data['papers_analyzed']} analyzed."
     if data["errors"]:
         status += f" ⚠️ {len(data['errors'])} non-fatal error(s) — see report for details."
 
-    return data["report_markdown"], status
+    paper_analyses = data.get("paper_analyses", [])
+    papers_panel = _format_papers_panel(paper_analyses)
+    pdf_paths = [
+        a["local_pdf_path"] for a in paper_analyses if a.get("local_pdf_path")
+    ]
+
+    return data["report_markdown"], status, papers_panel, pdf_paths
 
 
 def fetch_report_list() -> list[str]:
-    """
-    Calls GET /reports. Returns just the filenames, newest first
-    (the API already sorts them), for populating the dropdown.
-    """
     try:
         response = requests.get(f"{API_BASE_URL}/reports", timeout=10)
         response.raise_for_status()
-        # raise_for_status() turns a 4xx/5xx response into a Python
-        # exception, so it falls into the except block below instead
-        # of silently returning bad data. Good default any time you
-        # don't need to inspect the status code yourself.
         return [r["filename"] for r in response.json()]
     except requests.exceptions.RequestException as e:
         logger.warning(f"Could not fetch report list: {e}")
@@ -104,7 +115,6 @@ def fetch_report_list() -> list[str]:
 
 
 def fetch_report_content(filename: str) -> str:
-    """Calls GET /reports/{filename}. Returns the markdown content."""
     if not filename:
         return "Select a report from the dropdown above."
 
@@ -117,13 +127,6 @@ def fetch_report_content(filename: str) -> str:
 
 
 def fetch_graph_stats() -> tuple[str, str]:
-    """
-    Calls GET /graph/stats AND GET /health. Returns (stats_markdown,
-    health_status) — two separate calls because they answer two
-    different questions: "what's in the graph" vs "is the system up".
-    """
-    # Health first — if Neo4j is down, the stats call will fail too,
-    # so checking health first gives a clearer error message.
     try:
         health_response = requests.get(f"{API_BASE_URL}/health", timeout=10)
         health_data = health_response.json()
@@ -161,7 +164,7 @@ with gr.Blocks(title="ResearchPilot AI") as demo:
 
     with gr.Tabs():
 
-        # ── Tab 1: Run Research ─────────────────────────────────────
+        # ── Tab 1: Run Research (Layout C: report left, actions right) ──
         with gr.Tab("🔍 Run Research"):
             with gr.Row():
                 query_input = gr.Textbox(
@@ -180,19 +183,32 @@ with gr.Blocks(title="ResearchPilot AI") as demo:
 
             run_button = gr.Button("Run Pipeline", variant="primary")
             status_output = gr.Markdown()
-            # gr.Markdown() for status, not gr.Textbox() — lets the
-            # ✅/❌/⚠️ emoji and any markdown formatting render properly
-            # instead of showing as raw text.
 
-            report_output = gr.Markdown(label="Report")
+            with gr.Row():
+                with gr.Column(scale=2):
+                    report_output = gr.Markdown(label="Report")
+
+                # NEW (Phase 2g): right-hand actions panel — paper list
+                # + concept counts, and a multi-file PDF download box.
+                with gr.Column(scale=1):
+                    gr.Markdown("## ⚡ Actions")
+                    papers_panel_output = gr.Markdown()
+                    pdf_files_output = gr.File(
+                        label="📄 Download Paper PDFs",
+                        file_count="multiple",
+                        interactive=False,
+                        # interactive=False — this box is for the user
+                        # to DOWNLOAD files we already have, not upload
+                        # new ones. Without this it'd render as an
+                        # upload widget, which is the wrong affordance.
+                    )
 
             run_button.click(
                 fn=call_research_api,
                 inputs=[query_input, max_papers_input],
-                outputs=[report_output, status_output],
-                # The order here MUST match the tuple order returned
-                # by call_research_api(): (report_markdown, status).
-                # Gradio maps outputs positionally, not by name.
+                outputs=[report_output, status_output, papers_panel_output, pdf_files_output],
+                # Order MUST match call_research_api()'s return tuple:
+                # (report_markdown, status, papers_panel, pdf_paths)
             )
 
         # ── Tab 2: Past Reports ──────────────────────────────────────
@@ -205,10 +221,6 @@ with gr.Blocks(title="ResearchPilot AI") as demo:
             )
             report_viewer = gr.Markdown()
 
-            # When the tab's dropdown should populate: on a manual
-            # refresh click. We don't auto-load on page load to avoid
-            # an API call firing before the user has even seen the UI
-            # (and to keep behavior predictable if the API isn't up yet).
             refresh_button.click(
                 fn=fetch_report_list,
                 outputs=report_dropdown,
@@ -242,9 +254,6 @@ with gr.Blocks(title="ResearchPilot AI") as demo:
                 outputs=[stats_output, health_output],
             )
 
-    # Load graph stats once automatically when the UI first opens —
-    # this tab is read-only and cheap to call, unlike /research, so
-    # auto-loading here is safe and saves a click.
     demo.load(
         fn=fetch_graph_stats,
         outputs=[stats_output, health_output],

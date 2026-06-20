@@ -127,5 +127,24 @@
 
 
 
-from agents.orchestrator import run_pipeline
-print(run_pipeline('attention mechanisms in transformers'))
+from graph.connection import Neo4jConnection
+from agents.orchestrator import Orchestrator
+
+# Test 1: Can we connect?
+conn = Neo4jConnection()
+conn.connect()
+print("✅ Neo4j connected")
+conn.close()
+
+# Test 2: Run the pipeline
+orchestrator = Orchestrator(max_papers=2)
+result = orchestrator.run("transformer architecture")
+
+# Test 3: Check the critical metric
+papers_in_graph = result.graph_summary.get('papers', 0)
+print(f"Papers in graph: {papers_in_graph}")
+
+if papers_in_graph > 0:
+    print("✅ BUG 3 IS FIXED! Ready for UI")
+else:
+    print("❌ Still broken — check logs and fixes")

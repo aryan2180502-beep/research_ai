@@ -38,6 +38,11 @@ class OrchestrationResult:
     web_findings: list[dict] = field(default_factory=list)
     web_summary: str = ""
     critique: dict = field(default_factory=dict)
+    # NEW (Phase 2c): per-paper concepts (with summaries) + relationships,
+    # straight from run_graphrag_agent(), plus title joined back in.
+    # Without this, the report only ever showed paper COUNTS — never
+    # what was actually found in each paper.
+    paper_analyses: list[dict] = field(default_factory=list)
 
     def to_report(self) -> str:
         """Renders the result as a human-readable markdown report."""
@@ -64,6 +69,9 @@ class OrchestrationResult:
 - Total concepts in graph:      {self.graph_summary.get('concepts', 0)}
 - Total relationships in graph: {self.graph_summary.get('relationships', 0)}
 
+## Papers Analyzed
+{self._format_paper_analyses()}
+
 ## Research Gaps (isolated concepts)
 {gaps}
 
@@ -80,6 +88,39 @@ class OrchestrationResult:
 {self._format_critique()}
 """
 
+    def _format_paper_analyses(self) -> str:
+        """
+        NEW (Phase 2c): renders each paper's title, its concepts
+        (with the per-paper summary from Phase 2b), and the
+        relationships extracted between them.
+        """
+        if not self.paper_analyses:
+            return "  No paper analyses available."
+
+        lines = []
+        for analysis in self.paper_analyses:
+            title = analysis.get("title", "Untitled")
+            lines.append(f"### 📄 {title}")
+
+            concepts = analysis.get("concepts", [])
+            if concepts:
+                for c in concepts:
+                    lines.append(f"- **{c['name']}:** {c['summary']}")
+            else:
+                lines.append("  No concepts extracted.")
+
+            relationships = analysis.get("relationships", [])
+            if relationships:
+                lines.append("\n  **Relationships:**")
+                for r in relationships:
+                    lines.append(
+                        f"  - {r['concept_a']} → *{r['relation']}* → {r['concept_b']}"
+                    )
+
+            lines.append("")  # blank line between papers
+
+        return "\n".join(lines)
+
     def _format_web_findings(self) -> str:
         """Formats web findings for the markdown report."""
         if not self.web_findings:
@@ -93,10 +134,7 @@ class OrchestrationResult:
             lines.append(f"*Source:* {finding['source_url']}")
             lines.append("")
         return "\n".join(lines)
-    
 
-
-    
     def _format_critique(self) -> str:
         """Formats critique scores for the markdown report."""
         if not self.critique or self.critique.get("status") == "error":
@@ -124,6 +162,8 @@ class OrchestrationResult:
             f"\n**Recommendation:** {self.critique.get('recommendation', '')}"
         )
         return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────
 # 🧱 STEP 2: ORCHESTRATOR CLASS
 # ─────────────────────────────────────────────
@@ -164,6 +204,19 @@ class Orchestrator:
             try:
                 graphrag_result = run_graphrag_agent(papers[: self.max_papers])
                 result.papers_analyzed = graphrag_result.get("processed", 0)
+
+                # ── Phase 2c: capture rich per-paper data for the report ──
+                # run_graphrag_agent() returns "papers": [{paper_id, concepts, relationships}]
+                # but no title. The title lives in the original Stage 1 `papers`
+                # list, so build a quick lookup and join it in before storing.
+                title_lookup = {p["paper_id"]: p.get("title", "Untitled") for p in papers}
+                analyses = graphrag_result.get("papers", [])
+                for analysis in analyses:
+                    analysis["title"] = title_lookup.get(
+                        analysis.get("paper_id"), "Untitled"
+                    )
+                result.paper_analyses = analyses
+
                 logger.info(f"[Stage 2] Analyzed {result.papers_analyzed} papers")
             except Exception as e:
                 msg = f"GraphRAG agent failed: {e}"
@@ -171,9 +224,8 @@ class Orchestrator:
                 result.errors.append(msg)
         else:
             logger.warning("[Stage 2] Skipped — no papers from Stage 1")
-            
 
-        # ── Stage 2.5: Web Search ─────────────────────────────────────────────   
+        # ── Stage 2.5: Web Search ─────────────────────────────────────────────
         logger.info("Stage 2.5: Running web search agent")
         try:
             web_result = run_websearch_agent(query, max_results=5)
@@ -187,8 +239,6 @@ class Orchestrator:
                 logger.warning("Web search returned error status — continuing pipeline")
 
         except Exception as e:
-            # Same try/except pattern as every other stage —
-            # one agent failing never stops the pipeline
             result.errors.append(f"Web search stage exception: {e}")
             logger.error(f"Web search stage crashed: {e}")
 
@@ -246,12 +296,24 @@ class Orchestrator:
             for f in result.web_findings
         ) or "none"
 
+        # NEW (Phase 2c): condensed per-paper concept list so the critic can
+        # actually judge coverage/evidence quality against what was found,
+        # not just against paper counts. Kept to concept names only (not
+        # full summaries) since critique_report() caps the whole report at
+        # 3000 chars before sending it to the LLM.
+        paper_concepts = "\n".join(
+            f"- {a.get('title', 'Untitled')}: "
+            + ", ".join(c["name"] for c in a.get("concepts", []))
+            for a in result.paper_analyses
+        ) or "none"
+
         return (
             f"Query: {result.query}\n\n"
             f"Papers found: {result.papers_found}\n"
             f"Papers analyzed: {result.papers_analyzed}\n"
             f"Total concepts in graph: {result.graph_summary.get('concepts', 0)}\n"
             f"Total relationships: {result.graph_summary.get('relationships', 0)}\n\n"
+            f"Per-paper concepts:\n{paper_concepts}\n\n"
             f"Research gaps identified: {gaps}\n"
             f"Hub concepts: {hubs}\n\n"
             f"Web findings:\n{findings}\n"

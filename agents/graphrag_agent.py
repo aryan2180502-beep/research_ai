@@ -13,6 +13,7 @@ from typing_extensions import TypedDict
 
 from config import NVIDIA_MODEL, NVIDIA_API_KEY
 from pipeline.pdf_parser import PDFParser
+from pipeline.arxiv_fetcher import Paper  # NEW: import Paper dataclass
 from graph.connection import Neo4jConnection
 from pipeline.neo4j_ingestor import Neo4jIngestor
 
@@ -22,10 +23,19 @@ logger = logging.getLogger(__name__)
 # 🧱 STEP 1: UNIFIED PYDANTIC SCHEMA
 # ─────────────────────────────────────────────
 
+class ConceptSummary(BaseModel):
+    """A single concept plus a short explanation of how THIS paper uses it."""
+    name: str = Field(description="Short noun phrase naming the concept")
+    summary: str = Field(
+        description="1-2 sentences explaining how this specific paper defines, "
+                     "uses, or contributes to this concept. Be concrete — "
+                     "reference what the paper actually does, not a generic definition."
+    )
+
 class Relationship(BaseModel):
     """A single directed relationship between two concepts."""
-    concept_a: str = Field(description="The source concept")
-    concept_b: str = Field(description="The target concept")
+    concept_a: str = Field(description="The source concept (must match a 'name' in concepts list)")
+    concept_b: str = Field(description="The target concept (must match a 'name' in concepts list)")
     relation: str = Field(description="How concept_a relates to concept_b, e.g. 'improves', 'uses', 'extends'")
 
 class PaperAnalysis(BaseModel):
@@ -33,8 +43,9 @@ class PaperAnalysis(BaseModel):
     Complete analysis of a research paper in ONE LLM call.
     Replaces ConceptList + RelationshipList.
     """
-    concepts: list[str] = Field(
-        description="5 to 8 key concepts from the paper as short noun phrases"
+    concepts: list[ConceptSummary] = Field(
+        description="5 to 8 key concepts from the paper, each with a short summary "
+                     "of how this paper specifically uses or contributes to it"
     )
     relationships: list[Relationship] = Field(
         description="Meaningful connections between the concepts"
@@ -63,17 +74,15 @@ def get_ingestor() -> Neo4jIngestor:
 @tool
 def analyze_paper(pdf_path: str, paper_id: str) -> str:
     """
-    Extracts concepts AND relationships from a PDF in a single LLM call.
-    Stores results in Neo4j. Returns a summary string.
+    Extracts concepts (with per-concept summaries) AND relationships from a
+    PDF in a single LLM call. Stores results in Neo4j. Returns a summary string.
     """
-    # --- Parse PDF text ---
     parser = PDFParser(max_pages=5)
     text = parser.extract_text(pdf_path)
 
     if not text:
         return json.dumps({"error": f"Could not extract text from {pdf_path}"})
 
-    # --- One LLM call with structured output ---
     llm = ChatNVIDIA(
         model=NVIDIA_MODEL,
         api_key=NVIDIA_API_KEY,
@@ -84,8 +93,12 @@ def analyze_paper(pdf_path: str, paper_id: str) -> str:
     prompt = f"""You are a research paper analyzer. Extract information from this research paper.
 
 Return ONLY these two things:
-1. concepts: a list of 5 to 8 key concepts from the paper as short noun phrases
-2. relationships: a list of connections between those concepts
+1. concepts: a list of 5 to 8 key concepts from the paper. For EACH concept, also
+   write a 1-2 sentence summary of how THIS paper specifically defines, uses, or
+   contributes to it. Do not write a generic textbook definition — ground it in
+   what this paper actually does.
+2. relationships: a list of connections between those concepts (use the same
+   concept names you used above)
 
 Paper excerpt:
 {text[:2500]}
@@ -96,18 +109,17 @@ Paper excerpt:
     except Exception as e:
         logger.warning(f"Structured output call failed for {paper_id}: {e}")
 
-
     if result is None:
         logger.warning(f"Got None for {paper_id}, retrying with simpler prompt...")
-        simple_prompt = f"""List 5 key concepts from this text as JSON.
+        simple_prompt = f"""List 5 key concepts from this text as JSON, each with a
+one-sentence summary of how the text uses that concept.
 Text: {text[:1500]}
-Return only: {{"concepts": ["concept1", "concept2", ...], "relationships": []}}"""
+Return only: {{"concepts": [{{"name": "concept1", "summary": "..."}}, ...], "relationships": []}}"""
         try:
             result = structured_llm.invoke(simple_prompt)
         except Exception as e:
             logger.error(f"Retry also failed for {paper_id}: {e}")
 
-     # --- Layer 3: If still None, return safe error (don't crash) ---
     if result is None:
         logger.error(f"Could not extract structured output for paper {paper_id}")
         return json.dumps({
@@ -115,10 +127,9 @@ Return only: {{"concepts": ["concept1", "concept2", ...], "relationships": []}}"
             "paper_id": paper_id,
         })
 
-    # --- Write to Neo4j ---
     ingestor = get_ingestor()
     for concept in result.concepts:
-        ingestor.add_concept_to_paper(paper_id, concept)
+        ingestor.add_concept_to_paper(paper_id, concept.name, concept.summary)
 
     for rel in result.relationships:
         ingestor.link_related_concepts(rel.concept_a, rel.concept_b)
@@ -130,7 +141,7 @@ Return only: {{"concepts": ["concept1", "concept2", ...], "relationships": []}}"
 
     return json.dumps({
         "paper_id": paper_id,
-        "concepts": result.concepts,
+        "concepts": [c.model_dump() for c in result.concepts],
         "relationships": [r.model_dump() for r in result.relationships],
     })
 
@@ -149,7 +160,7 @@ def get_graph_statistics() -> str:
 
 class GraphRAGAgentState(TypedDict):
     messages: Annotated[list, add_messages]
-    papers: list[dict]   # [{paper_id, title, local_pdf_path}]
+    papers: list[dict]
 
 # ─────────────────────────────────────────────
 # 🧱 STEP 5: PUBLIC RUNNER FUNCTION -- no langgraph
@@ -158,7 +169,10 @@ class GraphRAGAgentState(TypedDict):
 def run_graphrag_agent(papers: list[dict]) -> dict:
     """
     Entry point called by orchestrator.
-    Loops over papers and calls analyze_paper tool directly.
+    Loops over papers and:
+    1. Ingests the paper into Neo4j (creates Paper node)
+    2. Analyzes the paper and extracts concepts (links to Paper)
+
     No LangGraph needed — the workflow is deterministic, not agentic.
     """
     if not papers:
@@ -166,19 +180,38 @@ def run_graphrag_agent(papers: list[dict]) -> dict:
 
     results = []
     errors = []
+    ingestor = get_ingestor()
 
-    for paper in papers:
-        paper_id = paper.get("paper_id")
-        pdf_path = paper.get("local_pdf_path")
+    for paper_dict in papers:
+        paper_id = paper_dict.get("paper_id")
+        pdf_path = paper_dict.get("local_pdf_path")
 
-        # Skip papers with no PDF
         if not pdf_path:
             logger.warning(f"Skipping {paper_id} — no local_pdf_path")
             continue
 
         logger.info(f"Processing paper: {paper_id}")
+
         try:
-            # Call the tool function directly (not via LangGraph)
+            paper = Paper(
+                paper_id=paper_dict["paper_id"],
+                title=paper_dict["title"],
+                authors=paper_dict.get("authors", []),
+                abstract=paper_dict.get("abstract", ""),
+                published=paper_dict.get("published", ""),
+                pdf_url=paper_dict.get("pdf_url", ""),
+                local_pdf_path=paper_dict["local_pdf_path"],
+            )
+
+            success = ingestor.ingest_paper(paper)
+            if not success:
+                msg = f"Failed to ingest paper {paper_id} into Neo4j"
+                logger.error(msg)
+                errors.append(msg)
+                continue
+
+            logger.info(f"✅ Ingested Paper node: {paper_id}")
+
             output = analyze_paper.invoke({
                 "pdf_path": pdf_path,
                 "paper_id": paper_id,
@@ -189,6 +222,10 @@ def run_graphrag_agent(papers: list[dict]) -> dict:
                 logger.warning(f"Paper {paper_id} returned error: {parsed['error']}")
                 errors.append(parsed["error"])
             else:
+                # NEW (Phase 2g): carry the PDF path forward so the API/UI
+                # can offer it as a download — without this, the UI has no
+                # way to know where each paper's file lives on disk.
+                parsed["local_pdf_path"] = pdf_path
                 results.append(parsed)
                 logger.info(
                     f"✅ {paper_id}: "

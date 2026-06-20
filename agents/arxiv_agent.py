@@ -250,7 +250,7 @@ def run_arxiv_agent(query: str) -> dict:
     The main function other parts of the system call.
 
     query: research topic to search for
-    Returns: dict with query, summary, and papers list
+    Returns: dict with query, summary, and papers list (with full Paper data)
     """
     logger.info(f"🤖 ArXiv Agent starting for query: '{query}'")
 
@@ -265,13 +265,13 @@ def run_arxiv_agent(query: str) -> dict:
     final_state = app.invoke(initial_state)
     final_message = final_state["messages"][-1].content
 
-    # ── THE FIX ───────────────────────────────────────────────────────
+    # ── FIX FOR BUG 3: Get full Paper objects ─────────────────────────
     # The LangGraph agent ran fetch_and_download_papers as a tool,
     # but tool results are just strings in the message history —
     # the actual Paper objects were never captured anywhere.
     #
     # Solution: call fetch_and_download directly after the agent loop
-    # to get the real Paper objects with paper_id and local_pdf_path.
+    # to get the real Paper objects with all fields needed for Neo4j.
     #
     # This is intentionally simple — the agent already confirmed what
     # to search for. We trust its query choice, re-run the download
@@ -279,10 +279,16 @@ def run_arxiv_agent(query: str) -> dict:
     # ─────────────────────────────────────────────────────────────────
     papers = _fetcher.fetch_and_download(query, max_results=3)
 
+    # ✅ APPROACH A: Enrich papers_as_dicts with ALL Paper fields
+    # so graphrag_agent can reconstruct Paper objects and call ingest_paper()
     papers_as_dicts = [
         {
             "paper_id": p.paper_id,
             "title": p.title,
+            "authors": p.authors,                    # NEW: added for Neo4j ingestion
+            "abstract": p.abstract,                  # NEW: added for Neo4j ingestion
+            "published": p.published,                # NEW: added for Neo4j ingestion
+            "pdf_url": p.pdf_url,                    # NEW: added for Neo4j ingestion
             "local_pdf_path": p.local_pdf_path,
         }
         for p in papers

@@ -126,22 +126,46 @@ class Neo4jIngestor:
             "author_name": author_name
         })
 
-    def add_concept_to_paper(self, paper_id: str, concept_name: str):
-        """
-        Links a Concept node to a Paper with INTRODUCES relationship.
+    # def add_concept_to_paper(self, paper_id: str, concept_name: str):
+    #     """
+    #     Links a Concept node to a Paper with INTRODUCES relationship.
 
-        This will be called by the GraphRAG Agent in Week 2
-        after it extracts concepts from the paper text using an LLM.
-        We define it now so the schema is ready.
+    #     This will be called by the GraphRAG Agent in Week 2
+    #     after it extracts concepts from the paper text using an LLM.
+    #     We define it now so the schema is ready.
+    #     """
+    #     query = """
+    #     MATCH (p:Paper {paper_id: $paper_id})
+    #     MERGE (c:Concept {name: $concept_name})
+    #     MERGE (p)-[:INTRODUCES]->(c)
+    #     """
+    #     self.conn.run_query(query, {
+    #         "paper_id": paper_id,
+    #         "concept_name": concept_name
+    #     })
+    #     logger.info(f"🔗 Linked concept '{concept_name}' to paper {paper_id}")
+
+    def add_concept_to_paper(self, paper_id: str, concept_name: str, summary: str = None):
+
         """
+        Links a Concept node to a Paper with an INTRODUCES relationship.
+        The summary (how THIS paper specifically uses/defines the concept)
+        is stored on the relationship, not the Concept node — because the
+        same Concept node is MERGE'd across many papers, and each paper
+        may explain it differently. Storing on the node would let the last
+        paper processed silently overwrite every earlier paper's summary.
+        """
+        
         query = """
         MATCH (p:Paper {paper_id: $paper_id})
         MERGE (c:Concept {name: $concept_name})
-        MERGE (p)-[:INTRODUCES]->(c)
+        MERGE (p)-[r:INTRODUCES]->(c)
+        SET r.summary = $summary
         """
         self.conn.run_query(query, {
             "paper_id": paper_id,
-            "concept_name": concept_name
+            "concept_name": concept_name,
+            "summary": summary
         })
         logger.info(f"🔗 Linked concept '{concept_name}' to paper {paper_id}")
 

@@ -8,9 +8,6 @@ import logging
 import sys
 from pathlib import Path
 
-# Same fix as scheduler/update_job.py — when api/routes.py is run
-# (directly or via uvicorn), Python needs the project root on its
-# import path to find the `agents`, `graph`, etc. packages.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException
@@ -26,21 +23,37 @@ REPORTS_DIR = Path(__file__).parent.parent / "reports"
 
 
 # ── Request / Response Models ───────────────────────────────────────
-# These are Pydantic models — same library as PaperAnalysis and
-# CritiqueResult in your agents. There, Pydantic forced the LLM's
-# output into a guaranteed shape. Here, it does the same job for
-# HTTP traffic: FastAPI uses these to validate incoming JSON bodies
-# AND to auto-generate the interactive docs at /docs.
 
 class ResearchRequest(BaseModel):
     """What a client sends to POST /research."""
     query: str = Field(..., min_length=3, description="Research topic to investigate")
     max_papers: int = Field(default=3, ge=1, le=10, description="Max papers to analyze")
-    # Field(..., min_length=3) — the "..." means this field is REQUIRED
-    # (no default value). min_length=3 rejects empty/junk queries like
-    # "a" before the request ever reaches your expensive pipeline.
-    # ge=1, le=10 on max_papers — same range-enforcement pattern you
-    # already used in critic_agent.py's DimensionScore (ge=0, le=10).
+
+
+# NEW (Phase 2g): nested models mirroring the dicts that come out of
+# OrchestrationResult.paper_analyses. Defining these explicitly (rather
+# than just typing paper_analyses as list[dict]) means FastAPI validates
+# the shape AND documents it at /docs — same reasoning as every other
+# Pydantic model in this file.
+
+class ConceptOut(BaseModel):
+    name: str
+    summary: str
+
+
+class RelationshipOut(BaseModel):
+    concept_a: str
+    concept_b: str
+    relation: str
+
+
+class PaperAnalysisOut(BaseModel):
+    """One paper's structured analysis — what the UI's right-hand panel renders."""
+    paper_id: str
+    title: str
+    local_pdf_path: str | None = None
+    concepts: list[ConceptOut] = []
+    relationships: list[RelationshipOut] = []
 
 
 class ResearchResponse(BaseModel):
@@ -50,6 +63,10 @@ class ResearchResponse(BaseModel):
     papers_found: int
     papers_analyzed: int
     errors: list[str]
+    # NEW (Phase 2g): structured per-paper data, separate from the
+    # markdown blob. The UI needs this to build the side panel (titles,
+    # concept counts, PDF paths) without re-parsing markdown text.
+    paper_analyses: list[PaperAnalysisOut] = []
 
 
 class ReportSummary(BaseModel):
@@ -76,15 +93,6 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
-    """
-    Confirms the service is up AND can reach Neo4j.
-
-    A health check that only says "the web server is running" is
-    nearly useless in practice — the web server can be up while the
-    database it depends on is down. Actually testing the Neo4j
-    connection here means this endpoint tells you something true
-    about whether /research will actually work.
-    """
     neo4j_ok = False
     try:
         conn = Neo4jConnection()
@@ -102,18 +110,6 @@ def health_check():
 
 @app.post("/research", response_model=ResearchResponse)
 def trigger_research(request: ResearchRequest):
-    """
-    Runs the full pipeline synchronously for a given query.
-
-    'Synchronous' means this HTTP request stays open and waits for
-    the ENTIRE pipeline (ArXiv -> GraphRAG -> web search -> critic)
-    to finish before responding — likely 30-60+ seconds. That's fine
-    for now and for a portfolio demo. The known tradeoff: if a client
-    has a short request timeout, or many people call this at once,
-    this approach won't scale. The fix later is a background task
-    queue (e.g. returning a job_id immediately and polling /status) —
-    intentionally deferred, not a bug, just out of scope until needed.
-    """
     request_id = request.query[:40]
     logger.info(f"POST /research — query='{request_id}', max_papers={request.max_papers}")
 
@@ -121,9 +117,6 @@ def trigger_research(request: ResearchRequest):
         orchestrator = Orchestrator(max_papers=request.max_papers)
         result = orchestrator.run(request.query)
     except Exception as e:
-        # Anything that escapes the orchestrator's own internal
-        # try/except (e.g. a totally unexpected crash) becomes a
-        # proper HTTP 500 instead of FastAPI's generic stack trace.
         logger.error(f"Pipeline crashed for query '{request_id}': {e}")
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
 
@@ -133,31 +126,25 @@ def trigger_research(request: ResearchRequest):
         papers_found=result.papers_found,
         papers_analyzed=result.papers_analyzed,
         errors=result.errors,
+        # Pydantic validates/coerces these plain dicts into
+        # PaperAnalysisOut/ConceptOut/RelationshipOut automatically
+        # because the field is typed as list[PaperAnalysisOut] —
+        # no manual conversion loop needed.
+        paper_analyses=result.paper_analyses,
     )
 
 
 @app.get("/reports", response_model=list[ReportSummary])
 def list_reports():
-    """
-    Lists all saved reports from the reports/ folder.
-
-    This is the same folder scheduler/update_job.py writes to — so
-    this endpoint surfaces both scheduled background runs AND any
-    manually saved reports, with no extra wiring needed.
-    """
     if not REPORTS_DIR.exists():
         return []
 
     files = sorted(REPORTS_DIR.glob("*.md"), reverse=True)
-    # reverse=True — since filenames start with a timestamp
-    # (YYYY-MM-DD_HH-MM-SS_...), sorting alphabetically also sorts
-    # chronologically. reverse=True means newest reports appear first,
-    # which is what anyone browsing a report list actually wants.
 
     return [
         ReportSummary(
             filename=f.name,
-            created_at=f.name[:19],  # "2026-06-19_14-30-05" prefix
+            created_at=f.name[:19],
         )
         for f in files
     ]
@@ -165,21 +152,8 @@ def list_reports():
 
 @app.get("/reports/{filename}")
 def get_report(filename: str):
-    """
-    Returns the raw markdown content of one specific report.
-
-    filename is a PATH parameter (part of the URL itself, e.g.
-    GET /reports/2026-06-19_14-30-05_graph-neural-networks.md)
-    as opposed to a query parameter (?filename=...) or a request
-    body. FastAPI infers this from the {filename} in the route
-    decorator matching the function argument name.
-    """
     filepath = REPORTS_DIR / filename
 
-    # Security check: prevent path traversal (e.g. someone requesting
-    # filename="../../config.py" to read files outside reports/).
-    # resolve() converts to an absolute path; the check confirms the
-    # resolved path is still INSIDE reports/, not escaped via "..".
     if not filepath.resolve().is_relative_to(REPORTS_DIR.resolve()):
         raise HTTPException(status_code=400, detail="Invalid filename")
 
@@ -191,14 +165,6 @@ def get_report(filename: str):
 
 @app.get("/graph/stats")
 def graph_stats():
-    """
-    Returns current graph summary: papers, concepts, relationships counts.
-
-    Reuses get_graph_summary() from graph/queries.py directly — no
-    new query logic needed, this endpoint is just an HTTP wrapper
-    around code that already exists. Good example of NOT duplicating
-    logic just because it's now being called from a new place.
-    """
     try:
         conn = Neo4jConnection()
         conn.connect()
