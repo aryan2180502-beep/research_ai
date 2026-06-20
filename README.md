@@ -80,7 +80,6 @@ flowchart TB
     style External fill:#3a3a3a,color:#fff
 ```
 
-**Why it's shaped this way:** the UI never imports the orchestrator directly — it only talks to the API over HTTP. That means the Gradio frontend could be swapped for a React app, a CLI, or a Slack bot tomorrow, and nothing in the backend would need to change. The same orchestrator is reused by both the API (on-demand) and the scheduler (recurring), so there's exactly one place pipeline logic lives.
 
 ---
 
@@ -134,27 +133,6 @@ This made debugging the "papers found but never analyzed" bug (below) dramatical
 The Gradio UI's **Graph Stats** tab shows counts (papers / concepts / relationships) pulled through the API. To see the actual *shape* of the graph — which concepts cluster, which papers connect — there's a direct link out to **Neo4j Browser**, pre-loaded with a starter Cypher query.
 
 > This is a deliberate, documented exception to the "UI only talks to the API" rule — the link bypasses the backend entirely. A proper fix would be a custom graph-visualization endpoint (e.g. rendered with Pyvis); this was the pragmatic version shipped under time constraints.
-
----
-
-## 🐛 Real Bugs I Found and Fixed
-
-A few of the more interesting ones — full history lives in code comments and commit messages.
-
-- **`papers_found=0` despite ArXiv clearly returning results.** The ArXiv agent's LangGraph loop never surfaced its tool-call results back out — `run_arxiv_agent()` only returned `query`/`summary`/`message_count`, no `papers` key. The orchestrator's `.get("papers", [])` silently defaulted to empty, so GraphRAG analysis was skipped *every single run* with no error thrown. Fixed by calling the fetcher directly after the LangGraph loop instead of trying to parse `Paper` objects back out of tool-call message history.
-- **LLM-as-judge returning `None` mid-pipeline.** Llama 3.1 8B occasionally fails structured output entirely. Added a three-layer defense in every agent that touches the LLM: try → retry with a simplified prompt → safe error return. One bad paper or one bad critique no longer crashes the whole run.
-- **UI timing out on real (non-stubbed) pipeline runs.** 120s felt generous until ArXiv + 3–4 LLM calls + Tavily + critic added up to 1–3 real minutes. Raised the client timeout — and learned the hard way that a client giving up isn't the same as the server stopping: the orchestrator kept running server-side even after Gradio's old timeout fired.
-- **`ModuleNotFoundError: No module named 'agents'`** when running `scheduler/update_job.py` directly. Python only adds a script's *own folder* to `sys.path`, not the project root — fixed with an explicit `sys.path.insert()` at the top of any script meant to run standalone.
-
----
-
-## 🔑 Key Decisions
-
-- **GraphRAG uses a plain `for` loop, not LangGraph.** Llama 3.1 8B doesn't reliably handle multi-tool-call sequences inside LangGraph. The rule that came out of this: reach for LangGraph when an agent needs to *reason* about what to do next; use a deterministic loop when the steps are already known.
-- **One LLM call per paper, not two.** Concepts and relationships were originally two separate calls — merged into a single `PaperAnalysis` schema to cut latency and cost in half.
-- **Domain-agnostic prompts.** Nothing says "ML/AI concepts" — just "key concepts" — so the same pipeline works for biology, physics, or any other research domain without prompt changes.
-- **`/research` runs synchronously.** A request blocks for the full pipeline duration (1–3+ min). Explicit, documented tradeoff for simplicity — see [Roadmap](#-roadmap) for the async upgrade path.
-- **MERGE, not CREATE, in every Cypher write.** Idempotency — re-running a pipeline on the same paper updates the graph instead of duplicating it.
 
 ---
 
@@ -218,13 +196,5 @@ researchpilot/
 ├── config.py
 └── main.py                # Starts API + UI together, clean shutdown
 ```
-
----
-
-## 💼 Concepts Demonstrated
-
-`Multi-agent orchestration` · `LangGraph vs. deterministic loops` · `Structured LLM output (Pydantic)` · `Graph-based gap detection` · `Meta-agent evaluation (LLM-as-judge)` · `Graceful degradation` · `Idempotent graph writes` · `Client/server decoupling` · `Distributed tracing (LangSmith)` · `Defense-in-depth security (path traversal guards)` · `Process orchestration (subprocess management)`
-
----
 
 *Built as a hands-on project — every architectural decision above was made (and several reversed) while building toward an AI/ML Engineer role.*
