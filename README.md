@@ -9,6 +9,8 @@ Give it a topic. It finds the papers, extracts the concepts, maps how they conne
 ## 🎥 Demo
 
 
+<img width="1918" height="1078" alt="Animation" src="https://github.com/user-attachments/assets/fabcf25a-c48b-467d-b901-14dac3cac750" />
+
 
 ---
 
